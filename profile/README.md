@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <a href="https://b4a.com.br"><img src="https://b4a.com.br/img/Logo_B4A_White.png" alt="B4a" width="200"></a>
+  <a href="https://b4a.com.br"><img src="https://b4a.com.br/_next/static/img/d2365d96976f12917d18f53ad82f564f.png" alt="B4a" width="200"></a>
   <br>
    Welcome to B4A - Beauty For All
   <br><br>
