@@ -1,0 +1,26 @@
+name: Tagging releasing and generating changelog
+
+on:
+  workflow_call:
+
+jobs:
+  tag-release-changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checking changelog...
+        id: changelog
+        uses: TriPSs/conventional-changelog-action@v3
+        with:
+          version-file: './package.json'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          output-file: 'CHANGELOG.md'
+
+      - name: Releasing...
+        uses: actions/create-release@v1
+        if: ${{ steps.changelog.outputs.skipped == 'false' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.changelog.outputs.tag }}
+          release_name: ${{ steps.changelog.outputs.tag }}
+          body: ${{ steps.changelog.outputs.clean_changelog }}
