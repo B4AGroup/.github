@@ -7,6 +7,8 @@ jobs:
   tag-release-changelog:
     runs-on: ubuntu-latest
     steps:
+      - name: Checking repo...
+        uses: actions/checkout@v3
       - name: Checking changelog...
         id: changelog
         uses: TriPSs/conventional-changelog-action@v3
