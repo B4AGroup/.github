@@ -9,6 +9,13 @@ jobs:
     steps:
       - name: Checking repo...
         uses: actions/checkout@v3
+        with:
+          fech-depth: 0
+          token: ${{ secrets.BOT_ACCESS_TOKEN }}
+      - name: Setup Git...
+        run: |
+          git config user.email "{{ secrets.BOT_EMAIL }}"
+          git config user.name "B4A - Bot"
       - name: Checking changelog...
         id: changelog
         uses: TriPSs/conventional-changelog-action@v3
