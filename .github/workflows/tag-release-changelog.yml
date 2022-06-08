@@ -10,7 +10,7 @@ jobs:
       - name: Checking repo...
         uses: actions/checkout@v3
         with:
-          fech-depth: 0
+          fetch-depth: 0
           token: ${{ secrets.BOT_ACCESS_TOKEN }}
       - name: Setup Git...
         run: |
@@ -20,8 +20,10 @@ jobs:
         id: changelog
         uses: TriPSs/conventional-changelog-action@v3
         with:
-          version-file: './package.json'
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          git-user-name: 'B4A - Bot'
+          git-user-email: ${{ secrets.BOT_EMAIL }}
+          version-file: './package.json'
           output-file: 'CHANGELOG.md'
 
       - name: Releasing...
