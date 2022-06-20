@@ -25,6 +25,7 @@ jobs:
           git-user-email: ${{ secrets.BOT_EMAIL }}
           version-file: './package.json'
           output-file: 'CHANGELOG.md'
+          skip-on-empty: 'false'
 
       - name: Releasing...
         uses: actions/create-release@v1
