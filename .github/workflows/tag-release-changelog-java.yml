@@ -23,9 +23,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           git-user-name: 'B4A - Bot'
           git-user-email: ${{ secrets.BOT_EMAIL }}
-          version-file: './pom.xml'
           output-file: 'CHANGELOG.md'
           skip-on-empty: 'false'
+          skip-version-file: 'true'
 
       - name: Releasing...
         uses: actions/create-release@v1
