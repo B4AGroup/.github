@@ -1,0 +1,28 @@
+name: Brain context gate tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/brain-context/**'
+      - '.github/workflows/brain-context*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/brain-context/**'
+      - '.github/workflows/brain-context*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (Node 20)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test scripts/brain-context/lib.test.mjs
