@@ -1,0 +1,61 @@
+name: Brain context
+
+# Org-wide PR gate: every PR must say which B4AGroup/b4a-brain pages were
+# checked before coding (or "none relevant: <reason>").
+#
+# Used in two ways:
+#   1. As an org ruleset "required workflow" (runs on pull_request in every repo).
+#   2. Called from a repo workflow with `uses: B4AGroup/.github/.github/workflows/brain-context.yml@main`.
+#
+# Logic and tests live in scripts/brain-context/. See README.md ("Brain context gate").
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  workflow_call:
+    inputs:
+      enforce_after:
+        description: ISO-8601 instant. Before it a failing PR only gets a warning; from it on the job fails.
+        type: string
+        required: false
+        default: '2026-10-19T00:00:00-03:00'
+      verify_search_log:
+        description: Phase B (not implemented yet). Verify the author ran brain.search during the branch window.
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      BRAIN_CONTEXT_TOKEN:
+        description: Optional token with read access to B4AGroup/b4a-brain, used to verify that links resolve. Falls back to GITHUB_TOKEN (format-only validation).
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  brain-context:
+    name: Brain context
+    runs-on: ubuntu-latest
+    steps:
+      # The gate script lives in B4AGroup/.github, not in the repo whose PR is
+      # being checked. PRs against B4AGroup/.github itself test their own copy.
+      - name: Check out the gate script
+        uses: actions/checkout@v4
+        with:
+          repository: B4AGroup/.github
+          ref: ${{ github.repository != 'B4AGroup/.github' && 'main' || '' }}
+          sparse-checkout: scripts/brain-context
+          persist-credentials: false
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check the "Brain context" section of the PR
+        run: node scripts/brain-context/check.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.BRAIN_CONTEXT_TOKEN || github.token }}
+          ENFORCE_AFTER: ${{ inputs.enforce_after || '2026-10-19T00:00:00-03:00' }}
+          VERIFY_SEARCH_LOG: ${{ inputs.verify_search_log || 'false' }}
