@@ -22,7 +22,7 @@ its logic is in [`scripts/brain-context/`](scripts/brain-context/) (Node 20, no 
 2. In the PR description keep the `## Brain context` heading from the template and fill it with **one of**:
    - one link per line to the pages you read, as `https://github.com/B4AGroup/b4a-brain/blob/...` or `.../tree/...` URLs (links to the repo root, issues or PRs do not count), **or**
    - a line `none relevant: <reason>` where the reason has at least 15 characters (the placeholder `<reason>` does not count).
-3. If the check complains, edit the PR description. Editing re-runs the check (`edited` event); so does pushing a commit.
+3. If the check complains, edit the PR description. Editing re-runs the check (`edited` event); so does pushing a commit or changing labels.
 
 Example that passes:
 
@@ -54,7 +54,7 @@ The check passes without inspecting the body for:
 
 - PRs authored by `dependabot` or `renovate` (including the `[bot]` logins);
 - PRs whose base repository is `B4AGroup/b4a-brain` itself;
-- PRs carrying the label **`brain-context-exempt`**. This is a lead override. It is recorded in the job summary and as a notice annotation so it stays auditable. After adding the label, re-run the check (re-run the job, edit the description or push a commit).
+- PRs carrying the label **`brain-context-exempt`**. This is a lead override. It is recorded in the job summary and as a notice annotation so it stays auditable. Adding or removing the label re-runs the check immediately (`labeled`/`unlabeled` events).
 
 ### Timeline
 
@@ -83,7 +83,7 @@ Phase B (planned, disabled): verify that the author actually ran `brain.search` 
 ```yaml
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 jobs:
   brain-context:
     uses: B4AGroup/.github/.github/workflows/brain-context.yml@main

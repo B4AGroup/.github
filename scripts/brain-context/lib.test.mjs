@@ -421,6 +421,14 @@ describe('runCheck', () => {
     assert.equal(result.annotations[0].level, 'notice');
   });
 
+  test('should judge the labels currently on the PR, not the label of a labeled/unlabeled event', async () => {
+    const exempt = { name: EXEMPT_LABEL };
+    const added = { action: 'labeled', label: exempt, pull_request: makePr({ body: '', labels: [exempt] }) };
+    const removed = { action: 'unlabeled', label: exempt, pull_request: makePr({ body: '', labels: [] }) };
+    assert.equal((await runCheck({ event: added, env: {}, now: AFTER, fetch: fakeFetch([]) })).status, 'skip');
+    assert.equal((await runCheck({ event: removed, env: {}, now: AFTER, fetch: fakeFetch([]) })).status, 'fail');
+  });
+
   test('should treat a null body as missing section', async () => {
     const pr = makePr({ body: null });
     const result = await runCheck({ event: { pull_request: pr }, env: {}, now: AFTER, fetch: fakeFetch([]) });
