@@ -2,7 +2,7 @@
 // Dependency-free (Node 20+). Nothing here touches the network; see clients.mjs
 // for the HTTP calls and review.mjs for the orchestration.
 
-export const COMMENT_MARKER = '<!-- pr-intent-review -->';
+export const COMMENT_MARKER = '<!-- b4a-pr-intent-review -->';
 export const BRAIN_REPO = 'B4AGroup/b4a-brain';
 export const DEFAULT_MODEL = 'claude-fable-5-1';
 export const DEFAULT_MAX_DIFF_CHARS = 60_000;

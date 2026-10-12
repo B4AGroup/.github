@@ -411,7 +411,7 @@ describe('buildSummary', () => {
     assert.match(summary, /^## PR intent review — NEEDS ATTENTION\n\nPR: B4AGroup\/glam-frontend#12 by `dev-one`/);
     assert.match(summary, /### Brain pages consulted\n- \[glam\/decisions\.md — Checkout\]\(https:\/\/github\.com/);
     assert.match(summary, /Comment: created/);
-    assert.doesNotMatch(summary, /pr-intent-review -->/);
+    assert.doesNotMatch(summary, /b4a-pr-intent-review -->/);
   });
   test('should render the skipped form', () => {
     const summary = buildSummary({ status: 'skipped', reason: 'why', pr: { repo: 'a/b', number: 1, author: 'x' }, commentOutcome: 'not posted (403)' });

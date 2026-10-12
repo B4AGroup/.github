@@ -239,7 +239,7 @@ describe('fetchPrFiles', () => {
 });
 
 describe('upsertStickyComment', () => {
-  const marker = '<!-- pr-intent-review -->';
+  const marker = '<!-- b4a-pr-intent-review -->';
 
   test('should create a new comment when none carries the marker', async () => {
     const fetch = fakeFetch([response(200, [{ id: 1, body: 'unrelated' }]), response(201, { id: 2 })]);

@@ -116,7 +116,7 @@ Logic: [`scripts/pr-intent-review/`](scripts/pr-intent-review/) (Node 20, no dep
 4. Fetches the PR diff through the GitHub API, skipping generated files (lockfiles, minified bundles, images, `dist/`…) and capping it at 8 000 characters per file and 60 000 in total.
 5. Asks Anthropic (`claude-fable-5-1` by default) for strict JSON:
    `{ verdict: pass | needs-attention | fail, reasons[], intent_justified, matches_ticket, fits_brain, diff_matches_intent }`.
-6. Posts **one sticky comment** on the PR (found again through the hidden marker `<!-- pr-intent-review -->` and updated in place), writes a job summary, and uploads the verdict as a JSON artifact (`pr-intent-review-pr<N>-run<attempt>`, kept 30 days) for the evaluation.
+6. Posts **one sticky comment** on the PR (found again through the hidden marker `<!-- b4a-pr-intent-review -->` and updated in place), writes a job summary, and uploads the verdict as a JSON artifact (`pr-intent-review-pr<N>-run<attempt>`, kept 30 days) for the evaluation.
 
 The job **always exits 0**. A missing secret or variable, an upstream API error, a timeout or a non-JSON
 model answer produces a comment `skipped: <reason>` (and the same reason in the summary and artifact), never a failure.
