@@ -1,0 +1,51 @@
+name: What and Why
+
+# Org-wide PR gate: every PR description must have a filled "## What and Why"
+# section (what the PR changes and why it is needed). Blocking from day one.
+#
+# When the section is missing the job fails and ONE sticky comment that
+# @mentions the author is posted (or updated in place on later pushes/edits),
+# so GitHub notifies them by email. Once the section is filled the comment is
+# edited into a resolved note. Fork PRs still fail but get no comment (the
+# workflow token is read-only there).
+#
+# Used in two ways:
+#   1. As an org ruleset "required workflow" (runs on pull_request in every repo).
+#   2. Called from a repo workflow with `uses: B4AGroup/.github/.github/workflows/what-and-why.yml@main`.
+#
+# Logic and tests live in scripts/what-and-why/. See README.md ("What and Why gate").
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  what-and-why:
+    name: What and Why
+    runs-on: ubuntu-latest
+    steps:
+      # The gate script lives in B4AGroup/.github, not in the repo whose PR is
+      # being checked. PRs against B4AGroup/.github itself test their own copy.
+      - name: Check out the gate script
+        uses: actions/checkout@v4
+        with:
+          repository: B4AGroup/.github
+          ref: ${{ github.repository != 'B4AGroup/.github' && 'main' || '' }}
+          sparse-checkout: scripts/what-and-why
+          persist-credentials: false
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check the "What and Why" section of the PR and alert the author
+        run: node scripts/what-and-why/check.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
