@@ -1,0 +1,95 @@
+name: PR intent review
+
+# WARN-ONLY pilot (approved by Jan, one week of evaluation, never blocks).
+# Reviews a pull request against its stated intent ("## What and Why"), its
+# Linear ticket (B4A-<n> from the branch or title), the B4A Brain (brain.search
+# through the B4A MCP gateway) and the diff, using Anthropic. Posts ONE sticky
+# comment with the verdict, writes a job summary and uploads a JSON artifact.
+#
+# The job always succeeds. A missing secret or an API error produces a
+# "skipped: <reason>" comment, never a failure.
+#
+# Call it from a repo workflow:
+#   uses: B4AGroup/.github/.github/workflows/pr-intent-review.yml@main
+#   secrets: inherit
+#
+# Logic and tests live in scripts/pr-intent-review/. See README.md ("PR intent review").
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: Anthropic model id used for the review.
+        type: string
+        required: false
+        default: claude-fable-5-1
+      max_diff_chars:
+        description: Total diff budget (characters) sent to the model.
+        type: number
+        required: false
+        default: 60000
+      brain_folder:
+        description: Optional top-level b4a-brain folder to restrict brain.search to (e.g. "bfluence").
+        type: string
+        required: false
+        default: ''
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: Anthropic API key. Missing -> the review is skipped (comment says why).
+        required: false
+      LINEAR_API_KEY:
+        description: Linear API key (personal key of a bot user; only queries are sent). Missing -> skipped.
+        required: false
+      B4A_MCP_TOKEN:
+        description: B4A MCP gateway service-account token (gw_svc_...) allowed to call brain.search. Missing -> skipped.
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    name: PR intent review (warn-only)
+    runs-on: ubuntu-latest
+    # Belt and braces: even if a step fails unexpectedly the job stays green.
+    continue-on-error: true
+    steps:
+      # The reviewer script lives in B4AGroup/.github, not in the repo whose PR is
+      # being reviewed. PRs against B4AGroup/.github itself test their own copy.
+      - name: Check out the reviewer script
+        uses: actions/checkout@v4
+        with:
+          repository: B4AGroup/.github
+          ref: ${{ github.repository != 'B4AGroup/.github' && 'main' || '' }}
+          sparse-checkout: scripts/pr-intent-review
+          persist-credentials: false
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Review the pull request intent
+        run: node scripts/pr-intent-review/run.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          B4A_MCP_TOKEN: ${{ secrets.B4A_MCP_TOKEN }}
+          # Org/repo *variable* (not a secret): the B4A MCP gateway MCP endpoint URL.
+          B4A_MCP_URL: ${{ vars.B4A_MCP_URL }}
+          MODEL: ${{ inputs.model || 'claude-fable-5-1' }}
+          MAX_DIFF_CHARS: ${{ inputs.max_diff_chars || 60000 }}
+          BRAIN_FOLDER: ${{ inputs.brain_folder }}
+          ARTIFACT_DIR: ${{ runner.temp }}/pr-intent-review
+
+      - name: Upload the verdict (evaluation log)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-intent-review-pr${{ github.event.pull_request.number }}-run${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-intent-review/
+          if-no-files-found: ignore
+          retention-days: 30
