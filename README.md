@@ -6,6 +6,7 @@ Organisation-wide defaults for B4AGroup repositories:
 - `.github/pull_request_template.md` — default pull request template for every repo that does not ship its own.
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`) and org ruleset required workflows.
 - `scripts/brain-context/` — logic and unit tests for the Brain context gate (below).
+- `scripts/pr-intent-review/` — logic and unit tests for the PR intent review (warn-only pilot, below).
 
 This repository is public. Never commit secrets, tokens or internal hostnames here.
 
@@ -96,4 +97,88 @@ jobs:
 
 ```bash
 node --test scripts/brain-context/lib.test.mjs
+```
+
+## PR intent review (warn-only pilot)
+
+An LLM reviewer that checks whether a pull request's **stated intent** is justified, matches its
+**Linear ticket**, fits the **B4A Brain**, and whether the **diff** does what the intent says.
+Approved by Jan as a one-week pilot: it is **advisory only and never blocks a merge**.
+
+Workflow: [`.github/workflows/pr-intent-review.yml`](.github/workflows/pr-intent-review.yml) (`workflow_call` only).
+Logic: [`scripts/pr-intent-review/`](scripts/pr-intent-review/) (Node 20, no dependencies).
+
+### What it does on every PR (`opened`, `edited`, `synchronize`, `reopened`)
+
+1. Parses the `## What and Why` section of the PR body (`## What & Why` and `###` also work; falls back to `## Summary` and says so).
+2. Extracts the Linear ID (`B4A-<number>`) from the branch name, then the PR title, and fetches the issue title, description, state, project, labels and parent (the spec) through the Linear GraphQL API. Only a query is sent.
+3. Searches the B4A Brain with the `brain.search` tool of the B4A MCP gateway (up to 3 short queries built from the repo + PR title, the ticket title and the first sentence of the intent; top 10 hits).
+4. Fetches the PR diff through the GitHub API, skipping generated files (lockfiles, minified bundles, images, `dist/`…) and capping it at 8 000 characters per file and 60 000 in total.
+5. Asks Anthropic (`claude-fable-5-1` by default) for strict JSON:
+   `{ verdict: pass | needs-attention | fail, reasons[], intent_justified, matches_ticket, fits_brain, diff_matches_intent }`.
+6. Posts **one sticky comment** on the PR (found again through the hidden marker `<!-- pr-intent-review -->` and updated in place), writes a job summary, and uploads the verdict as a JSON artifact (`pr-intent-review-pr<N>-run<attempt>`, kept 30 days) for the evaluation.
+
+The job **always exits 0**. A missing secret or variable, an upstream API error, a timeout or a non-JSON
+model answer produces a comment `skipped: <reason>` (and the same reason in the summary and artifact), never a failure.
+PRs by `dependabot`/`renovate` and PRs targeting `B4AGroup/b4a-brain` are skipped silently (summary only, no comment).
+`matches_ticket` is `n/a` when no ticket ID is present; `fits_brain` is `n/a` when the brain has no relevant hits.
+
+### Required org secrets and variable (org owners)
+
+All of them are read at run time only and never printed. Set them at the organisation level
+(*Settings → Secrets and variables → Actions*) and grant access to the pilot repositories.
+
+| Name | Kind | Purpose |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | secret | Anthropic API key used for the review call. |
+| `LINEAR_API_KEY` | secret | Linear API key (personal key of a dedicated bot user is recommended). The workflow only runs read queries. |
+| `B4A_MCP_TOKEN` | secret | B4A MCP gateway service-account token (`gw_svc_…`) whose role allows `brain.search`. Create it in the gateway console (*service accounts*) and store it here only. |
+| `B4A_MCP_URL` | **variable** | The MCP endpoint of the B4A MCP gateway (`https://<gateway host>/mcp`; see `shared/shared-apis.md` in the brain). A variable, not a secret, so it is never hard-coded in this public repo. |
+
+If any of the four is missing the review is skipped with the name of the missing item, so a repo can
+be onboarded before the secrets exist without breaking anything.
+
+### Calling it from a pilot repo
+
+Create `.github/workflows/pr-intent-review.yml` in the repository (identical for `glam-frontend`,
+`admin-frontend` and `subscription-api`):
+
+```yaml
+name: PR intent review
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  pr-intent-review:
+    uses: B4AGroup/.github/.github/workflows/pr-intent-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      B4A_MCP_TOKEN: ${{ secrets.B4A_MCP_TOKEN }}
+    # Optional inputs: model (default claude-fable-5-1), max_diff_chars (default 60000),
+    # brain_folder (e.g. "bfluence" to restrict brain.search to one product folder).
+```
+
+`secrets: inherit` also works when the org secrets are visible to the repo. `B4A_MCP_URL` is read
+from the `vars` context, so it only has to exist as an org (or repo) variable.
+Pull requests from forks get a read-only `GITHUB_TOKEN`; the review still runs, the comment cannot
+be posted, and the summary says so.
+
+### Evaluating the pilot
+
+Every run uploads `verdict-<owner>__<repo>-pr<N>-<sha>.json` with the verdict, the four booleans,
+the reasons, the brain pages consulted, the diff statistics, the raw model answer and the skip reason
+if any. Download the artifacts of the pilot repos after the week to compare verdicts with what the
+human reviewers decided. Nothing in the artifact or the comment contains a secret value.
+
+### Running the tests
+
+```bash
+node --test scripts/pr-intent-review/*.test.mjs
 ```
