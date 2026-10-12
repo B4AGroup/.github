@@ -1,5 +1,5 @@
-## Summary
-<!-- What changes and why. One or two sentences. -->
+## What and Why
+<!-- Required. What does this PR change, and why is it needed? Two or three sentences in plain language: the problem or goal, and what this change does about it. The check fails while this section is empty or still a placeholder. -->
 
 ## Linear ticket
 <!-- B4A-XXX (execution child). -->
