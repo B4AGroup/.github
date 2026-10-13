@@ -2,7 +2,9 @@
 // Entry point for the "What and Why" PR gate (GitHub Actions).
 // Reads the pull_request event payload, runs the check, keeps the sticky
 // author-alert comment in sync, writes the job summary and workflow
-// annotations, and exits 1 when the section is missing.
+// annotations, and exits 1 when the section is missing. Until
+// DEFAULT_ENFORCE_AFTER (lib.mjs; override with the ENFORCE_AFTER env) a
+// missing section only warns: the comment is still posted but the exit code is 0.
 
 import { readFile, appendFile } from 'node:fs/promises';
 import { runCheck } from './lib.mjs';

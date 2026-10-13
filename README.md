@@ -16,7 +16,7 @@ This repository is public. Never commit secrets, tokens or internal hostnames he
 Every pull request in the organisation must say **what it changes and why it is needed**.
 The gate is the workflow [`.github/workflows/what-and-why.yml`](.github/workflows/what-and-why.yml);
 its logic is in [`scripts/what-and-why/`](scripts/what-and-why/) (Node 20, no dependencies).
-It blocks from day one: there is no warning period.
+It is warn-only until **2026-10-19 00:00 America/Sao_Paulo** and blocks automatically from then on (see "Timeline" below).
 
 ### What developers must do
 
@@ -36,17 +36,26 @@ Examples that fail: the untouched template (comment only), `TBD`, `n/a`, `<what 
 ### What the check does
 
 - Finds the `## What and Why` (or `###`, or `What & Why`) heading in the PR body, ignoring HTML comments.
-- Fails when the section is missing, empty, placeholder-only or shorter than 20 characters of real text. The job exits 1, which blocks the merge wherever the workflow is required.
-- Writes a job summary with the outcome, the text found, notes and a "how to fix" block, plus an error annotation on failure.
+- Fails when the section is missing, empty, placeholder-only or shorter than 20 characters of real text. In blocking mode the job exits 1, which blocks the merge wherever the workflow is required; in warn mode it exits 0 (see "Timeline").
+- Writes a job summary with the outcome, the mode, the text found, notes and a "how to fix" block, plus a warning (warn mode) or error (blocking mode) annotation on failure.
+
+### Timeline
+
+| Period | Behaviour |
+| --- | --- |
+| Until **2026-10-18** (23:59:59 UTC-3) | Warning only: a failing PR gets a warning annotation and the sticky author comment (which says until when the check is warn-only), and the job exits 0. |
+| From **2026-10-19 00:00 UTC-3** | Blocking: a failing PR gets an error annotation and the sticky author comment, and the job exits 1, which blocks the merge wherever the workflow is required. |
+
+The switch is the single constant `DEFAULT_ENFORCE_AFTER` (`2026-10-19T00:00:00-03:00`) in [`scripts/what-and-why/lib.mjs`](scripts/what-and-why/lib.mjs). Nothing needs to change on the date: the check flips to blocking by itself. The `ENFORCE_AFTER` env (ISO-8601) overrides it; it exists for the tests.
 
 ### Author alert (sticky comment)
 
-When the check fails on `opened`, `edited`, `synchronize` or `reopened`, the workflow keeps **one** comment on the PR, identified by a hidden marker (`<!-- b4a-what-and-why -->`):
+When the check fails on `opened`, `edited`, `synchronize`, `reopened` or `ready_for_review`, in both modes, the workflow keeps **one** comment on the PR, identified by a hidden marker (`<!-- b4a-what-and-why -->`):
 
-- First failure: posts the comment, which `@mentions` the PR author. GitHub notifies them (email, depending on their notification settings) because of the mention.
+- First failure: posts the comment, which `@mentions` the PR author. GitHub notifies them (email, depending on their notification settings) because of the mention. In warn mode the comment states the date until which the check is warn-only.
 - Later pushes or edits while still failing: updates that same comment in place. No new comment, no new notification.
 - Once the section is filled: edits the comment into a short "resolved" note.
-- Fork PRs: the workflow token is read-only, so the comment is skipped (the job summary says so) but the check still fails.
+- Fork PRs: the workflow token is read-only, so the comment is skipped (the job summary says so) but the check result still applies.
 - If the comment API refuses (for example a repository that restricts `GITHUB_TOKEN`), the check result stands and a warning annotation explains that the alert could not be posted.
 
 The comment needs `pull-requests: write` and `issues: write`. The workflow declares them in its `permissions` block; when calling it with `uses:` the caller must grant the same permissions (see below).
@@ -61,7 +70,7 @@ The check passes without inspecting the body for PRs authored by `dependabot` or
 2. **Org ruleset.** Add the workflow to the same ruleset as the Brain context gate (or create a sibling one). *Organisation settings → Repository → Rulesets → `Brain context gate` → Edit*:
    - Under **Require workflows to pass before merging** → *Add workflow* → repository `B4AGroup/.github`, branch `main`, path `.github/workflows/what-and-why.yml`.
    - Keep the targets as they are (all repositories, default branch plus `main`, `master`, `develop`). `b4a-brain` may stay excluded or be included; the What and Why gate has no special case for it.
-   - Enforcement: *Active*. The gate is meant to block immediately; use *Evaluate* only if you want to watch the ruleset insights for a day first.
+   - Enforcement: *Active*. The script itself is warn-only (exit 0) until 2026-10-19 00:00 UTC-3, so an *Active* ruleset does not block anyone before that date.
    - Bypass list: leave empty.
 3. **Workflow permissions.** The required workflow runs with the target repository's `GITHUB_TOKEN` and asks for `pull-requests: write` and `issues: write` in its `permissions` block. No change is needed for repositories using the default settings. If a repository has *Settings → Actions → General → Workflow permissions* locked down by a policy that forbids elevating permissions, the check still runs and fails correctly; only the comment is skipped (warning annotation).
 4. **Calling it directly** (instead of, or in addition to, the ruleset) from a repo workflow:
@@ -69,7 +78,7 @@ The check passes without inspecting the body for PRs authored by `dependabot` or
 ```yaml
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
 jobs:
   what-and-why:
     uses: B4AGroup/.github/.github/workflows/what-and-why.yml@main
@@ -82,7 +91,7 @@ jobs:
 ### Running the tests
 
 ```bash
-node --test scripts/what-and-why/lib.test.mjs
+node --test scripts/what-and-why/lib.test.mjs scripts/what-and-why/check.test.mjs
 ```
 
 ## Brain context gate

@@ -1,13 +1,18 @@
 name: What and Why
 
 # Org-wide PR gate: every PR description must have a filled "## What and Why"
-# section (what the PR changes and why it is needed). Blocking from day one.
+# section (what the PR changes and why it is needed).
 #
-# When the section is missing the job fails and ONE sticky comment that
-# @mentions the author is posted (or updated in place on later pushes/edits),
-# so GitHub notifies them by email. Once the section is filled the comment is
-# edited into a resolved note. Fork PRs still fail but get no comment (the
-# workflow token is read-only there).
+# Warn-only until 2026-10-19 00:00 America/Sao_Paulo, blocking automatically
+# from then on. The switch is DEFAULT_ENFORCE_AFTER in scripts/what-and-why/lib.mjs
+# (ENFORCE_AFTER env overrides it in tests). Before that instant a missing
+# section gets a warning annotation and the job exits 0; from it on the job fails.
+#
+# In both modes ONE sticky comment that @mentions the author is posted (or
+# updated in place on later pushes/edits), so GitHub notifies them by email;
+# while warning, the comment says until when the check is warn-only. Once the
+# section is filled the comment is edited into a resolved note. Fork PRs get
+# the same check result but no comment (the workflow token is read-only there).
 #
 # Used in two ways:
 #   1. As an org ruleset "required workflow" (runs on pull_request in every repo).
@@ -17,7 +22,7 @@ name: What and Why
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
   workflow_call:
 
 permissions:

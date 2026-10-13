@@ -1,7 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  COMMENT_ACTIONS,
   COMMENT_MARKER,
+  DEFAULT_ENFORCE_AFTER,
   MIN_TEXT_LENGTH,
   buildFailingComment,
   buildResolvedComment,
@@ -13,6 +15,7 @@ import {
   hasMarker,
   isBotAuthor,
   isForkPullRequest,
+  resolveMode,
   runCheck,
   syncStickyComment,
 } from './lib.mjs';
@@ -75,6 +78,9 @@ function stickyComment(bodyText) {
 
 const env = { GITHUB_TOKEN: 'ghs_test', GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: '123', GITHUB_SERVER_URL: 'https://github.com' };
 const RUN_URL = `https://github.com/${REPO}/actions/runs/123`;
+// Warn mode (before 2026-10-19 00:00 UTC-3) and blocking mode (after it).
+const BEFORE = new Date('2026-10-13T15:00:00Z');
+const AFTER = new Date('2026-10-20T15:00:00Z');
 
 describe('isBotAuthor', () => {
   test('should match dependabot and renovate logins with and without the [bot] suffix', () => {
@@ -222,6 +228,37 @@ describe('isForkPullRequest', () => {
   });
 });
 
+describe('resolveMode', () => {
+  test('should use the default enforce date when the value is empty, blank or undefined', () => {
+    assert.equal(resolveMode(BEFORE, '').raw, DEFAULT_ENFORCE_AFTER);
+    assert.equal(resolveMode(BEFORE, '   ').raw, DEFAULT_ENFORCE_AFTER);
+    assert.equal(resolveMode(BEFORE, undefined).raw, DEFAULT_ENFORCE_AFTER);
+    assert.equal(resolveMode(BEFORE, null).raw, DEFAULT_ENFORCE_AFTER);
+  });
+  test('should warn before the default date and enforce from it on', () => {
+    assert.equal(resolveMode(BEFORE, undefined).enforcing, false);
+    assert.equal(resolveMode(AFTER, undefined).enforcing, true);
+  });
+  test('should flip exactly at the boundary (2026-10-19T00:00 America/Sao_Paulo is 03:00Z)', () => {
+    assert.equal(resolveMode(new Date('2026-10-19T02:59:59.999Z'), undefined).enforcing, false);
+    assert.equal(resolveMode(new Date('2026-10-19T03:00:00Z'), undefined).enforcing, true);
+  });
+  test('should honour an ENFORCE_AFTER override', () => {
+    assert.equal(resolveMode(AFTER, '2030-01-01T00:00:00Z').enforcing, false);
+    assert.equal(resolveMode(BEFORE, '2020-01-01T00:00:00Z').enforcing, true);
+    assert.equal(resolveMode(BEFORE, '2030-01-01T00:00:00Z').raw, '2030-01-01T00:00:00Z');
+  });
+  test('should accept a numeric or string timestamp for now', () => {
+    assert.equal(resolveMode(AFTER.getTime(), undefined).enforcing, true);
+    assert.equal(resolveMode(BEFORE.toISOString(), undefined).enforcing, false);
+  });
+  test('should report an error for an invalid date', () => {
+    const result = resolveMode(BEFORE, 'next week');
+    assert.equal(result.error, 'ENFORCE_AFTER is not a valid ISO-8601 date: "next week"');
+    assert.equal(result.enforcing, undefined);
+  });
+});
+
 describe('comment builders', () => {
   test('should start with the marker and mention the author in the failing comment', () => {
     const text = buildFailingComment({ author: 'dev-one', problems: ['p1'], runUrl: RUN_URL });
@@ -229,6 +266,24 @@ describe('comment builders', () => {
     assert.match(text, /@dev-one, this pull request needs/);
     assert.match(text, /- p1/);
     assert.match(text, new RegExp(`\\(${RUN_URL.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\)`));
+  });
+  test('should say "before it can be merged" and not mention a warn date in blocking mode', () => {
+    const text = buildFailingComment({ author: 'dev-one', problems: ['p1'], runUrl: RUN_URL });
+    assert.match(text, /before it can be merged/);
+    assert.doesNotMatch(text, /Warning only until/);
+    assert.doesNotMatch(text, /2026-10-19/);
+  });
+  test('should mention the warn-until date and the author in warn mode', () => {
+    const text = buildFailingComment({ author: 'dev-one', problems: ['p1'], runUrl: RUN_URL, warnUntil: DEFAULT_ENFORCE_AFTER });
+    assert.equal(text.startsWith(COMMENT_MARKER), true);
+    assert.match(text, /@dev-one, this pull request needs a filled \*\*What and Why\*\* section/);
+    assert.match(text, /\*\*Warning only until 2026-10-19T00:00:00-03:00\.\*\* This check does not block the merge yet/);
+    assert.doesNotMatch(text, /before it can be merged/);
+    assert.match(text, /- p1/);
+  });
+  test('should produce different text for warn and blocking mode so the comment is updated on the switch', () => {
+    const args = { author: 'dev-one', problems: ['p1'], runUrl: RUN_URL };
+    assert.notEqual(buildFailingComment({ ...args, warnUntil: DEFAULT_ENFORCE_AFTER }), buildFailingComment(args));
   });
   test('should not mention anyone when the author is unknown and still work without a run URL', () => {
     const text = buildFailingComment({ author: null, problems: [], runUrl: null });
@@ -303,6 +358,23 @@ describe('syncStickyComment', () => {
     assert.equal(result.action, 'unchanged');
     assert.equal(fetch.calls.length, 1);
   });
+  test('should post the warn-mode text when warnUntil is given', async () => {
+    const fetch = fakeApi();
+    const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, warnUntil: DEFAULT_ENFORCE_AFTER, fetch });
+    assert.equal(result.action, 'created');
+    const post = fetch.calls.find((call) => call.method === 'POST');
+    assert.match(post.body.body, /@dev-one/);
+    assert.match(post.body.body, /Warning only until 2026-10-19T00:00:00-03:00/);
+  });
+  test('should update the warn-mode comment in place when the mode switches to blocking', async () => {
+    const warnText = buildFailingComment({ author: 'dev-one', problems: base.problems, runUrl: RUN_URL, warnUntil: DEFAULT_ENFORCE_AFTER });
+    const fetch = fakeApi({ existing: [stickyComment(warnText)] });
+    const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+    assert.equal(result.action, 'updated');
+    const patch = fetch.calls.find((call) => call.method === 'PATCH');
+    assert.doesNotMatch(patch.body.body, /Warning only until/);
+    assert.match(patch.body.body, /before it can be merged/);
+  });
   test('should edit the comment into a resolved note when passing', async () => {
     const fetch = fakeApi({ existing: [stickyComment(`${COMMENT_MARKER}\nfailing text`)] });
     const result = await syncStickyComment({ ...base, pr: makePr(), failing: false, fetch });
@@ -360,44 +432,65 @@ describe('syncStickyComment', () => {
   });
 });
 
-describe('runCheck', () => {
+describe('runCheck — blocking mode (from 2026-10-19 00:00 UTC-3)', () => {
+  const run = (event, options = {}) => runCheck({ event, env, now: AFTER, fetch: fakeApi(), ...options });
+
   test('should pass with exit 0 and no comment when the section is filled on a fresh PR', async () => {
     const fetch = fakeApi();
-    const result = await runCheck({ event: { action: 'opened', pull_request: makePr() }, env, fetch });
+    const result = await run({ action: 'opened', pull_request: makePr() }, { fetch });
     assert.equal(result.status, 'pass');
     assert.equal(result.exitCode, 0);
     assert.deepEqual(result.annotations, []);
     assert.equal(result.comment.action, 'none');
     assert.match(result.summary, /passed/);
+    assert.match(result.summary, /Mode: \*\*blocking\*\*/);
     assert.match(result.summary, /### Section text/);
   });
 
   test('should fail with exit 1 and post a mentioning comment when the section is empty on opened', async () => {
     const fetch = fakeApi();
     const pr = makePr({ body: body('') });
-    const result = await runCheck({ event: { action: 'opened', pull_request: pr }, env, fetch });
+    const result = await run({ action: 'opened', pull_request: pr }, { fetch });
     assert.equal(result.status, 'fail');
     assert.equal(result.exitCode, 1);
     assert.equal(result.annotations.length, 1);
     assert.equal(result.annotations[0].level, 'error');
     assert.match(result.annotations[0].message, /^What and Why check failed: /);
     assert.equal(result.comment.action, 'created');
+    const post = fetch.calls.find((call) => call.method === 'POST');
+    assert.match(post.body.body, /before it can be merged/);
+    assert.doesNotMatch(post.body.body, /Warning only until/);
     assert.match(result.summary, /Posted a comment mentioning @dev-one/);
     assert.match(result.summary, /### Problems/);
+    assert.doesNotMatch(result.summary, /would be blocked/);
   });
 
-  test('should fail immediately with no warning window', async () => {
-    const pr = makePr({ body: body('') });
-    const result = await runCheck({ event: { action: 'synchronize', pull_request: pr }, env: { ...env, ENFORCE_AFTER: '2999-01-01T00:00:00Z' }, fetch: fakeApi() });
+  test('should fail with exit 1 when the section is missing (no heading)', async () => {
+    const result = await run({ action: 'opened', pull_request: makePr({ body: '## Summary\nlong enough text here' }) });
     assert.equal(result.status, 'fail');
     assert.equal(result.exitCode, 1);
-    assert.doesNotMatch(result.summary, /warning/i);
+    assert.match(result.summary, /no "## What and Why" heading/);
+  });
+
+  test('should fail exactly at the switch instant (2026-10-19T03:00:00Z)', async () => {
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'opened', pull_request: pr }, { now: new Date('2026-10-19T03:00:00Z') });
+    assert.equal(result.status, 'fail');
+    assert.equal(result.exitCode, 1);
+  });
+
+  test('should block before the default date when ENFORCE_AFTER is overridden to the past', async () => {
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'opened', pull_request: pr }, { now: BEFORE, env: { ...env, ENFORCE_AFTER: '2020-01-01T00:00:00Z' } });
+    assert.equal(result.status, 'fail');
+    assert.equal(result.exitCode, 1);
+    assert.match(result.summary, /ENFORCE_AFTER=2020-01-01T00:00:00Z has passed/);
   });
 
   test('should update the existing comment instead of posting again on synchronize', async () => {
     const fetch = fakeApi({ existing: [stickyComment(`${COMMENT_MARKER}\nold`)] });
     const pr = makePr({ body: body('TBD') });
-    const result = await runCheck({ event: { action: 'synchronize', pull_request: pr }, env, fetch });
+    const result = await run({ action: 'synchronize', pull_request: pr }, { fetch });
     assert.equal(result.status, 'fail');
     assert.equal(result.comment.action, 'updated');
     assert.equal(fetch.calls.filter((call) => call.method === 'POST').length, 0);
@@ -405,16 +498,25 @@ describe('runCheck', () => {
 
   test('should resolve the comment when the section gets filled on edited', async () => {
     const fetch = fakeApi({ existing: [stickyComment(`${COMMENT_MARKER}\nold`)] });
-    const result = await runCheck({ event: { action: 'edited', pull_request: makePr() }, env, fetch });
+    const result = await run({ action: 'edited', pull_request: makePr() }, { fetch });
     assert.equal(result.status, 'pass');
     assert.equal(result.comment.action, 'resolved');
     assert.match(result.summary, /Edited the existing comment into a resolved note/);
   });
 
+  test('should sync the comment on ready_for_review', async () => {
+    const fetch = fakeApi();
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'ready_for_review', pull_request: pr }, { fetch });
+    assert.equal(result.status, 'fail');
+    assert.equal(result.comment.action, 'created');
+    assert.equal(fetch.calls.filter((call) => call.method === 'POST').length, 1);
+  });
+
   test('should still fail on a fork PR but skip the comment', async () => {
     const fetch = fakeApi();
     const pr = forkPr({ body: body('') });
-    const result = await runCheck({ event: { action: 'opened', pull_request: pr }, env, fetch });
+    const result = await run({ action: 'opened', pull_request: pr }, { fetch });
     assert.equal(result.status, 'fail');
     assert.equal(result.exitCode, 1);
     assert.equal(result.comment.action, 'skipped-fork');
@@ -425,7 +527,7 @@ describe('runCheck', () => {
   test('should keep failing and add a warning annotation when the comment API denies writes', async () => {
     const fetch = fakeApi({ createStatus: 403 });
     const pr = makePr({ body: body('') });
-    const result = await runCheck({ event: { action: 'opened', pull_request: pr }, env, fetch });
+    const result = await run({ action: 'opened', pull_request: pr }, { fetch });
     assert.equal(result.status, 'fail');
     assert.equal(result.exitCode, 1);
     assert.equal(result.annotations.length, 2);
@@ -438,7 +540,7 @@ describe('runCheck', () => {
     const fetch = fakeApi();
     for (const login of ['dependabot[bot]', 'renovate[bot]']) {
       const pr = makePr({ body: '', user: { login } });
-      const result = await runCheck({ event: { action: 'opened', pull_request: pr }, env, fetch });
+      const result = await run({ action: 'opened', pull_request: pr }, { fetch });
       assert.equal(result.status, 'skip');
       assert.equal(result.exitCode, 0);
       assert.equal(result.comment, null);
@@ -448,8 +550,7 @@ describe('runCheck', () => {
   });
 
   test('should treat a null body as a missing section', async () => {
-    const pr = makePr({ body: null });
-    const result = await runCheck({ event: { action: 'opened', pull_request: pr }, env, fetch: fakeApi() });
+    const result = await run({ action: 'opened', pull_request: makePr({ body: null }) });
     assert.equal(result.status, 'fail');
     assert.match(result.summary, /no "## What and Why" heading/);
   });
@@ -457,7 +558,7 @@ describe('runCheck', () => {
   test('should not sync the comment for actions outside the comment list', async () => {
     const fetch = fakeApi();
     const pr = makePr({ body: body('') });
-    const result = await runCheck({ event: { action: 'labeled', pull_request: pr }, env, fetch });
+    const result = await run({ action: 'labeled', pull_request: pr }, { fetch });
     assert.equal(result.status, 'fail');
     assert.equal(result.comment, null);
     assert.equal(fetch.calls.length, 0);
@@ -467,15 +568,169 @@ describe('runCheck', () => {
   test('should include the run URL in the posted comment when the env provides it', async () => {
     const fetch = fakeApi();
     const pr = makePr({ body: body('') });
-    await runCheck({ event: { action: 'opened', pull_request: pr }, env, fetch });
+    await run({ action: 'opened', pull_request: pr }, { fetch });
     const post = fetch.calls.find((call) => call.method === 'POST');
     assert.match(post.body.body, new RegExp(RUN_URL.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')));
   });
 
   test('should error with exit 1 when the event has no pull_request', async () => {
-    const result = await runCheck({ event: { push: {} }, env, fetch: fakeApi() });
+    const result = await run({ push: {} });
     assert.equal(result.status, 'error');
     assert.equal(result.exitCode, 1);
     assert.equal(result.annotations[0].level, 'error');
+  });
+
+  test('should error with exit 1 on an invalid ENFORCE_AFTER and not touch the API', async () => {
+    const fetch = fakeApi();
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'opened', pull_request: pr }, { fetch, env: { ...env, ENFORCE_AFTER: 'soon' } });
+    assert.equal(result.status, 'error');
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.comment, null);
+    assert.equal(fetch.calls.length, 0);
+    assert.match(result.annotations[0].message, /ENFORCE_AFTER is not a valid ISO-8601 date: "soon"/);
+  });
+});
+
+describe('runCheck — warn mode (before 2026-10-19 00:00 UTC-3)', () => {
+  const run = (event, options = {}) => runCheck({ event, env, now: BEFORE, fetch: fakeApi(), ...options });
+
+  test('should pass with exit 0 when the section is filled and state the warn-only mode', async () => {
+    const result = await run({ action: 'opened', pull_request: makePr() });
+    assert.equal(result.status, 'pass');
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(result.annotations, []);
+    assert.equal(result.summary.includes(`Mode: **warning only** until ${DEFAULT_ENFORCE_AFTER}; from then on this check blocks the merge.`), true);
+  });
+
+  test('should warn with exit 0 and still post the mentioning comment when the section is empty on opened', async () => {
+    const fetch = fakeApi();
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'opened', pull_request: pr }, { fetch });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.annotations.length, 1);
+    assert.equal(result.annotations[0].level, 'warning');
+    assert.match(result.annotations[0].message, /^What and Why check would fail: The "What and Why" section is empty/);
+    assert.equal(result.comment.action, 'created');
+    const post = fetch.calls.find((call) => call.method === 'POST');
+    assert.equal(post.body.body.startsWith(COMMENT_MARKER), true);
+    assert.match(post.body.body, /@dev-one/);
+    assert.match(post.body.body, /Warning only until 2026-10-19T00:00:00-03:00/);
+    assert.match(result.summary, /warning \(not blocking yet\)/);
+    assert.match(result.summary, /This PR would be blocked from 2026-10-19T00:00:00-03:00/);
+    assert.match(result.summary, /### Problems/);
+  });
+
+  test('should warn with exit 0 when the section is missing (no heading)', async () => {
+    const fetch = fakeApi();
+    const result = await run({ action: 'opened', pull_request: makePr({ body: '## Summary\nlong enough text here' }) }, { fetch });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.comment.action, 'created');
+    assert.match(result.summary, /no "## What and Why" heading/);
+  });
+
+  test('should warn with exit 0 for a null body, placeholders and too-short text', async () => {
+    for (const prBody of [null, body('TBD'), body('x'.repeat(MIN_TEXT_LENGTH - 1))]) {
+      const result = await run({ action: 'opened', pull_request: makePr({ body: prBody }) });
+      assert.equal(result.status, 'warn', `expected warn for body ${JSON.stringify(prBody)}`);
+      assert.equal(result.exitCode, 0);
+    }
+  });
+
+  test('should still warn one millisecond before the switch instant', async () => {
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'opened', pull_request: pr }, { now: new Date('2026-10-19T02:59:59.999Z') });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+  });
+
+  test('should warn after the default date when ENFORCE_AFTER is overridden to the future', async () => {
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'synchronize', pull_request: pr }, { now: AFTER, env: { ...env, ENFORCE_AFTER: '2999-01-01T00:00:00Z' } });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+    assert.match(result.summary, /until 2999-01-01T00:00:00Z/);
+  });
+
+  test('should put the overridden ENFORCE_AFTER into the comment text', async () => {
+    const fetch = fakeApi();
+    const pr = makePr({ body: body('') });
+    await run({ action: 'opened', pull_request: pr }, { fetch, env: { ...env, ENFORCE_AFTER: '2999-01-01T00:00:00Z' } });
+    const post = fetch.calls.find((call) => call.method === 'POST');
+    assert.match(post.body.body, /Warning only until 2999-01-01T00:00:00Z/);
+  });
+
+  test('should update the existing comment in place on synchronize while warning', async () => {
+    const fetch = fakeApi({ existing: [stickyComment(`${COMMENT_MARKER}\nold`)] });
+    const pr = makePr({ body: body('TBD') });
+    const result = await run({ action: 'synchronize', pull_request: pr }, { fetch });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.comment.action, 'updated');
+    assert.equal(fetch.calls.filter((call) => call.method === 'POST').length, 0);
+    const patch = fetch.calls.find((call) => call.method === 'PATCH');
+    assert.match(patch.body.body, /Warning only until 2026-10-19T00:00:00-03:00/);
+  });
+
+  test('should resolve the comment when the section gets filled while warning', async () => {
+    const fetch = fakeApi({ existing: [stickyComment(`${COMMENT_MARKER}\nold`)] });
+    const result = await run({ action: 'edited', pull_request: makePr() }, { fetch });
+    assert.equal(result.status, 'pass');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.comment.action, 'resolved');
+  });
+
+  test('should sync the comment on ready_for_review while warning', async () => {
+    const fetch = fakeApi();
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'ready_for_review', pull_request: pr }, { fetch });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.comment.action, 'created');
+  });
+
+  test('should warn on a fork PR with exit 0 and skip the comment', async () => {
+    const fetch = fakeApi();
+    const pr = forkPr({ body: body('') });
+    const result = await run({ action: 'opened', pull_request: pr }, { fetch });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.comment.action, 'skipped-fork');
+    assert.equal(fetch.calls.length, 0);
+  });
+
+  test('should keep exit 0 and add a second warning annotation when the comment API denies writes', async () => {
+    const fetch = fakeApi({ createStatus: 403 });
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'opened', pull_request: pr }, { fetch });
+    assert.equal(result.status, 'warn');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.annotations.length, 2);
+    assert.equal(result.annotations[0].level, 'warning');
+    assert.match(result.annotations[0].message, /would fail/);
+    assert.equal(result.annotations[1].level, 'warning');
+    assert.match(result.annotations[1].message, /Author alert could not be posted/);
+  });
+
+  test('should skip bots with exit 0 and never touch the API', async () => {
+    const fetch = fakeApi();
+    const result = await run({ action: 'opened', pull_request: makePr({ body: '', user: { login: 'dependabot[bot]' } }) }, { fetch });
+    assert.equal(result.status, 'skip');
+    assert.equal(result.exitCode, 0);
+    assert.equal(fetch.calls.length, 0);
+  });
+
+  test('should still error with exit 1 on an invalid ENFORCE_AFTER before the date', async () => {
+    const result = await run({ action: 'opened', pull_request: makePr() }, { env: { ...env, ENFORCE_AFTER: 'soon' } });
+    assert.equal(result.status, 'error');
+    assert.equal(result.exitCode, 1);
+  });
+});
+
+describe('COMMENT_ACTIONS', () => {
+  test('should include every pull_request type the workflow triggers on', () => {
+    assert.deepEqual([...COMMENT_ACTIONS].sort(), ['edited', 'opened', 'ready_for_review', 'reopened', 'synchronize']);
   });
 });
