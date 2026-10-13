@@ -25,4 +25,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node --test scripts/what-and-why/lib.test.mjs
+      - run: node --test scripts/what-and-why/lib.test.mjs scripts/what-and-why/check.test.mjs

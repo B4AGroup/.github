@@ -6,7 +6,11 @@ export const SECTION_TITLE = 'What and Why';
 export const MIN_TEXT_LENGTH = 20;
 export const COMMENT_MARKER = '<!-- b4a-what-and-why -->';
 export const DEFAULT_API_URL = 'https://api.github.com';
-export const COMMENT_ACTIONS = new Set(['opened', 'edited', 'synchronize', 'reopened']);
+export const COMMENT_ACTIONS = new Set(['opened', 'edited', 'synchronize', 'reopened', 'ready_for_review']);
+// Single source of truth for the warn/block switch: 2026-10-19 00:00 America/Sao_Paulo.
+// Before this instant a failing PR gets a warning (exit 0); from it on the job fails (exit 1).
+// Override with the ENFORCE_AFTER env (ISO-8601) in tests.
+export const DEFAULT_ENFORCE_AFTER = '2026-10-19T00:00:00-03:00';
 
 const HEADING_RE = /^(#{2,3})\s*what\s*(?:and|&)\s*why\b.*$/im;
 const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
@@ -124,6 +128,17 @@ export function decideSkip(pr) {
   return { skip: false };
 }
 
+/** Parses ENFORCE_AFTER (or the default) and tells whether failures block at `now`. */
+export function resolveMode(now, enforceAfterRaw) {
+  const raw = (enforceAfterRaw ?? '').trim() || DEFAULT_ENFORCE_AFTER;
+  const enforceAfter = new Date(raw);
+  if (Number.isNaN(enforceAfter.getTime())) {
+    return { error: `ENFORCE_AFTER is not a valid ISO-8601 date: "${raw}"`, raw };
+  }
+  const nowDate = now instanceof Date ? now : new Date(now);
+  return { enforcing: nowDate.getTime() >= enforceAfter.getTime(), enforceAfter, raw };
+}
+
 /** True when the head repository differs from the base (fork PR: GITHUB_TOKEN is read-only). */
 export function isForkPullRequest(pr) {
   const head = pr?.head?.repo?.full_name;
@@ -144,14 +159,24 @@ function runLink(runUrl) {
   return runUrl ? `[${SECTION_TITLE} check](${runUrl})` : `${SECTION_TITLE} check`;
 }
 
-/** Comment posted while the section is missing. Mentions the author so GitHub notifies them. */
-export function buildFailingComment({ author, problems, runUrl }) {
+/**
+ * Comment posted while the section is missing. Mentions the author so GitHub notifies them.
+ * `warnUntil` (ISO-8601 string) switches the text to warn mode: the check is not blocking yet.
+ */
+export function buildFailingComment({ author, problems, runUrl, warnUntil = null }) {
   const mention = author ? `@${author}, this` : 'This';
+  const requirement = warnUntil
+    ? [
+      `${mention} pull request needs a filled **${SECTION_TITLE}** section in its description.`,
+      '',
+      `**Warning only until ${warnUntil}.** This check does not block the merge yet; from that instant on it fails the PR until the section is filled.`,
+    ]
+    : [`${mention} pull request needs a filled **${SECTION_TITLE}** section in its description before it can be merged.`];
   return [
     COMMENT_MARKER,
     `### ${SECTION_TITLE} is missing`,
     '',
-    `${mention} pull request needs a filled **${SECTION_TITLE}** section in its description before it can be merged.`,
+    ...requirement,
     '',
     ...problems.map((problem) => `- ${problem}`),
     '',
@@ -246,7 +271,7 @@ async function updateComment({ fetch, token, apiUrl, repo, commentId, body }) {
  * Fork PRs and missing tokens are skipped because the token cannot write.
  * Never throws: API problems come back as { action: 'error', note }.
  */
-export async function syncStickyComment({ pr, failing, problems, runUrl, fetch, token, apiUrl = DEFAULT_API_URL }) {
+export async function syncStickyComment({ pr, failing, problems, runUrl, warnUntil = null, fetch, token, apiUrl = DEFAULT_API_URL }) {
   const repo = pr?.base?.repo?.full_name;
   const number = pr?.number;
   if (!repo || !number) {
@@ -273,7 +298,7 @@ export async function syncStickyComment({ pr, failing, problems, runUrl, fetch, 
   if (existing.error) return { action: 'error', note: `Comment skipped: ${existing.error}.` };
 
   const author = pr?.user?.login ?? null;
-  const desired = failing ? buildFailingComment({ author, problems, runUrl }) : buildResolvedComment({ runUrl });
+  const desired = failing ? buildFailingComment({ author, problems, runUrl, warnUntil }) : buildResolvedComment({ runUrl });
 
   try {
     if (!existing.comment) {
@@ -306,6 +331,7 @@ export function buildSummary(result) {
   if (result.pr) {
     lines.push(`PR: ${result.pr.repo}#${result.pr.number} by \`${result.pr.author}\``);
   }
+  if (result.modeLine) lines.push(result.modeLine);
   lines.push('');
   for (const line of result.lines ?? []) lines.push(line);
   if (result.text) {
@@ -328,9 +354,10 @@ function buildRunUrl(env) {
 
 /**
  * Runs the whole gate for a pull_request event payload.
- * Returns { status: 'pass' | 'skip' | 'fail' | 'error', exitCode, summary, annotations, comment }.
+ * Before ENFORCE_AFTER a missing section yields status 'warn' (exit 0); from then on 'fail' (exit 1).
+ * Returns { status: 'pass' | 'skip' | 'warn' | 'fail' | 'error', exitCode, summary, annotations, comment }.
  */
-export async function runCheck({ event, env = {}, fetch = globalThis.fetch }) {
+export async function runCheck({ event, env = {}, now = new Date(), fetch = globalThis.fetch }) {
   const pr = event?.pull_request;
   if (!pr) {
     const message = 'No pull_request in the event payload. This workflow must run on pull_request events.';
@@ -349,6 +376,20 @@ export async function runCheck({ event, env = {}, fetch = globalThis.fetch }) {
     author: pr.user?.login ?? 'unknown',
   };
 
+  const mode = resolveMode(now, env.ENFORCE_AFTER);
+  if (mode.error) {
+    return {
+      status: 'error',
+      exitCode: 1,
+      annotations: [{ level: 'error', message: mode.error }],
+      summary: buildSummary({ title: 'configuration error', pr: prInfo, problems: [mode.error] }),
+      comment: null,
+    };
+  }
+  const modeLine = mode.enforcing
+    ? `Mode: **blocking** (ENFORCE_AFTER=${mode.raw} has passed).`
+    : `Mode: **warning only** until ${mode.raw}; from then on this check blocks the merge.`;
+
   const skip = decideSkip(pr);
   if (skip.skip) {
     const line = `Check skipped: ${skip.reason}.`;
@@ -356,7 +397,7 @@ export async function runCheck({ event, env = {}, fetch = globalThis.fetch }) {
       status: 'skip',
       exitCode: 0,
       annotations: [],
-      summary: buildSummary({ title: 'skipped', pr: prInfo, lines: [line] }),
+      summary: buildSummary({ title: 'skipped', pr: prInfo, modeLine, lines: [line] }),
       comment: null,
     };
   }
@@ -372,6 +413,7 @@ export async function runCheck({ event, env = {}, fetch = globalThis.fetch }) {
       failing: !evaluation.ok,
       problems: evaluation.problems,
       runUrl: buildRunUrl(env),
+      warnUntil: mode.enforcing ? null : mode.raw,
       fetch,
       token: env.GITHUB_TOKEN,
       apiUrl: env.GITHUB_API_URL || DEFAULT_API_URL,
@@ -392,6 +434,7 @@ export async function runCheck({ event, env = {}, fetch = globalThis.fetch }) {
       summary: buildSummary({
         title: 'passed',
         pr: prInfo,
+        modeLine,
         lines: [`The "${SECTION_TITLE}" section is filled in.`],
         text: evaluation.text,
         notes,
@@ -400,15 +443,17 @@ export async function runCheck({ event, env = {}, fetch = globalThis.fetch }) {
     };
   }
 
-  const message = `${SECTION_TITLE} check failed: ${evaluation.problems[0]}\n${howToFix()}`;
-  annotations.unshift({ level: 'error', message });
+  const headline = `${SECTION_TITLE} check ${mode.enforcing ? 'failed' : 'would fail'}: ${evaluation.problems[0]}`;
+  annotations.unshift({ level: mode.enforcing ? 'error' : 'warning', message: `${headline}\n${howToFix()}` });
   return {
-    status: 'fail',
-    exitCode: 1,
+    status: mode.enforcing ? 'fail' : 'warn',
+    exitCode: mode.enforcing ? 1 : 0,
     annotations,
     summary: buildSummary({
-      title: 'failed',
+      title: mode.enforcing ? 'failed' : 'warning (not blocking yet)',
       pr: prInfo,
+      modeLine,
+      lines: mode.enforcing ? [] : [`This PR would be blocked from ${mode.raw}. Fix it now to avoid surprises.`],
       notes,
       problems: evaluation.problems,
     }),
