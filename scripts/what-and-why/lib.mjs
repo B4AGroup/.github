@@ -6,7 +6,11 @@ export const SECTION_TITLE = 'What and Why';
 export const MIN_TEXT_LENGTH = 20;
 export const COMMENT_MARKER = '<!-- b4a-what-and-why -->';
 export const DEFAULT_API_URL = 'https://api.github.com';
-export const COMMENT_ACTIONS = new Set(['opened', 'edited', 'synchronize', 'reopened', 'ready_for_review']);
+// Every pull_request type the workflow triggers on syncs the comment. `labeled`/`unlabeled`
+// are included so the gate re-check (scripts/gate-recheck) notifies the authors of PRs that
+// were open before the ruleset went live; two such runs can start within a second of each
+// other, which is why syncStickyComment deduplicates after creating.
+export const COMMENT_ACTIONS = new Set(['opened', 'edited', 'synchronize', 'reopened', 'ready_for_review', 'labeled', 'unlabeled']);
 // Single source of truth for the warn/block switch: 2026-10-19 00:00 America/Sao_Paulo.
 // Before this instant a failing PR gets a warning (exit 0); from it on the job fails (exit 1).
 // Override with the ENFORCE_AFTER env (ISO-8601) in tests.
@@ -224,20 +228,43 @@ async function readJson(res) {
   }
 }
 
-/** Finds the sticky comment (by marker) among the PR's issue comments. */
+function toStickyComment(comment) {
+  return { id: comment.id, body: comment.body, url: comment.html_url };
+}
+
+/**
+ * Finds the sticky comment (by marker) among the PR's issue comments.
+ * When more than one marker comment exists (two runs raced on the first
+ * failure), the oldest one is `comment` and the rest are `duplicates`.
+ */
 export async function findStickyComment({ fetch, token, apiUrl = DEFAULT_API_URL, repo, number, maxPages = 10 }) {
+  const matches = [];
   for (let page = 1; page <= maxPages; page += 1) {
     const url = `${apiUrl}/repos/${repo}/issues/${number}/comments?per_page=100&page=${page}`;
     const res = await fetch(url, { headers: githubHeaders(token) });
     if (res.status !== 200) {
-      return { error: `could not list comments (HTTP ${res.status})`, comment: null };
+      return { error: `could not list comments (HTTP ${res.status})`, comment: null, duplicates: [] };
     }
     const comments = (await readJson(res)) ?? [];
-    const match = comments.find((comment) => hasMarker(comment?.body));
-    if (match) return { comment: { id: match.id, body: match.body, url: match.html_url } };
+    matches.push(...comments.filter((comment) => hasMarker(comment?.body)).map(toStickyComment));
     if (comments.length < 100) break;
   }
-  return { comment: null };
+  if (matches.length === 0) return { comment: null, duplicates: [] };
+  matches.sort((a, b) => a.id - b.id);
+  return { comment: matches[0], duplicates: matches.slice(1) };
+}
+
+/** Deletes duplicate sticky comments; 404 counts as deleted. Returns how many are gone. */
+async function deleteComments({ fetch, token, apiUrl, repo }, comments) {
+  let deleted = 0;
+  for (const comment of comments) {
+    const res = await fetch(`${apiUrl}/repos/${repo}/issues/comments/${comment.id}`, {
+      method: 'DELETE',
+      headers: githubHeaders(token),
+    });
+    if (res.status === 204 || res.status === 404) deleted += 1;
+  }
+  return deleted;
 }
 
 async function createComment({ fetch, token, apiUrl, repo, number, body }) {
@@ -268,6 +295,10 @@ async function updateComment({ fetch, token, apiUrl, repo, commentId, body }) {
  *   failing + comment     -> update in place (no new notification)
  *   passing + comment     -> edit it into a resolved note
  *   passing + no comment  -> nothing
+ * Two runs of the gate can start within a second of each other (push + edit,
+ * or the labeled + unlabeled pair fired by scripts/gate-recheck) and both see
+ * "no comment yet". After creating, the comment list is read again and every
+ * marker comment except the oldest is deleted, so the PR ends up with one.
  * Fork PRs and missing tokens are skipped because the token cannot write.
  * Never throws: API problems come back as { action: 'error', note }.
  */
@@ -299,28 +330,40 @@ export async function syncStickyComment({ pr, failing, problems, runUrl, warnUnt
 
   const author = pr?.user?.login ?? null;
   const desired = failing ? buildFailingComment({ author, problems, runUrl, warnUntil }) : buildResolvedComment({ runUrl });
+  const dedupeNote = (count) => (count > 0 ? ` Removed ${count} duplicate comment${count === 1 ? '' : 's'} left by a concurrent run.` : '');
 
   try {
     if (!existing.comment) {
       if (!failing) return { action: 'none', note: null };
       const created = await createComment({ ...io, body: desired });
       if (created.error) return { action: 'error', note: `Comment skipped: ${created.error}.` };
+
+      // A concurrent run may have created its own comment between our list and our create.
+      const recheck = await findStickyComment(io);
+      const duplicates = recheck.error ? [] : recheck.duplicates;
+      const removed = duplicates.length > 0 ? await deleteComments(io, duplicates) : 0;
+      const url = (removed > 0 && recheck.comment?.url) || created.url;
       return {
         action: 'created',
-        url: created.url,
-        note: `Posted a comment mentioning @${author ?? 'the author'}${created.url ? ` (${created.url})` : ''}.`,
+        url,
+        note: `Posted a comment mentioning @${author ?? 'the author'}${url ? ` (${url})` : ''}.${dedupeNote(removed)}`,
       };
     }
 
+    const removed = existing.duplicates.length > 0 ? await deleteComments(io, existing.duplicates) : 0;
     if (normalizeBody(existing.comment.body) === normalizeBody(desired)) {
-      return { action: 'unchanged', url: existing.comment.url, note: 'Existing comment is already up to date; nothing posted.' };
+      return {
+        action: 'unchanged',
+        url: existing.comment.url,
+        note: `Existing comment is already up to date; nothing posted.${dedupeNote(removed)}`,
+      };
     }
     const updated = await updateComment({ ...io, commentId: existing.comment.id, body: desired });
     if (updated.error) return { action: 'error', note: `Comment skipped: ${updated.error}.` };
     const url = updated.url ?? existing.comment.url;
     return failing
-      ? { action: 'updated', url, note: `Updated the existing comment in place (no new notification)${url ? ` (${url})` : ''}.` }
-      : { action: 'resolved', url, note: `Edited the existing comment into a resolved note${url ? ` (${url})` : ''}.` };
+      ? { action: 'updated', url, note: `Updated the existing comment in place (no new notification)${url ? ` (${url})` : ''}.${dedupeNote(removed)}` }
+      : { action: 'resolved', url, note: `Edited the existing comment into a resolved note${url ? ` (${url})` : ''}.${dedupeNote(removed)}` };
   } catch (error) {
     return { action: 'error', note: `Comment skipped: ${error?.message ?? error}.` };
   }
