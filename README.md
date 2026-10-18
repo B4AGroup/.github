@@ -7,6 +7,7 @@ Organisation-wide defaults for B4AGroup repositories:
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`) and org ruleset required workflows.
 - `scripts/what-and-why/` — logic and unit tests for the What and Why gate (below).
 - `scripts/brain-context/` — logic and unit tests for the Brain context gate (below).
+- `scripts/gate-recheck/` — tool that re-runs both gates on every open PR of the org and creates the exempt label everywhere (below, "Gate re-check tool"), with the activation runbook for the ruleset.
 - `scripts/pr-intent-review/` — logic and unit tests for the PR intent review (warn-only pilot, below).
 
 This repository is public. Never commit secrets, tokens or internal hostnames here.
@@ -22,7 +23,7 @@ It is warn-only until **2026-10-19 00:00 America/Sao_Paulo** and blocks automati
 
 1. Keep the `## What and Why` heading from the PR template (it is the first section) and write two or three sentences: the problem or goal, and what this change does about it.
 2. At least 20 characters of real text are required. The template's HTML comment, blank bullets, `<angle placeholders>` and placeholder words such as `TBD`, `TODO`, `WIP` or `n/a` do not count.
-3. If the check complains, edit the PR description. Editing re-runs the check (`edited` event); so does pushing a commit.
+3. If the check complains, edit the PR description. Editing re-runs the check (`edited` event); so does pushing a commit, changing labels or marking the PR ready for review.
 
 Example that passes:
 
@@ -50,11 +51,12 @@ The switch is the single constant `DEFAULT_ENFORCE_AFTER` (`2026-10-19T00:00:00-
 
 ### Author alert (sticky comment)
 
-When the check fails on `opened`, `edited`, `synchronize`, `reopened` or `ready_for_review`, in both modes, the workflow keeps **one** comment on the PR, identified by a hidden marker (`<!-- b4a-what-and-why -->`):
+When the check fails on any of the events the workflow triggers on (`opened`, `edited`, `synchronize`, `reopened`, `ready_for_review`, `labeled`, `unlabeled`), in both modes, the workflow keeps **one** comment on the PR, identified by a hidden marker (`<!-- b4a-what-and-why -->`):
 
 - First failure: posts the comment, which `@mentions` the PR author. GitHub notifies them (email, depending on their notification settings) because of the mention. In warn mode the comment states the date until which the check is warn-only.
-- Later pushes or edits while still failing: updates that same comment in place. No new comment, no new notification.
+- Later pushes, edits or label changes while still failing: updates that same comment in place. No new comment, no new notification.
 - Once the section is filled: edits the comment into a short "resolved" note.
+- Two runs can start within a second of each other (push + edit, or the label add + remove fired by the gate re-check tool) and both see "no comment yet". After posting, the run re-reads the comments and deletes every marker comment except the oldest, so the PR always ends up with exactly one.
 - Fork PRs: the workflow token is read-only, so the comment is skipped (the job summary says so) but the check result still applies.
 - If the comment API refuses (for example a repository that restricts `GITHUB_TOKEN`), the check result stands and a warning annotation explains that the alert could not be posted.
 
@@ -71,14 +73,15 @@ The check passes without inspecting the body for PRs authored by `dependabot` or
    - Under **Require workflows to pass before merging** → *Add workflow* → repository `B4AGroup/.github`, branch `main`, path `.github/workflows/what-and-why.yml`.
    - Keep the targets as they are (all repositories, default branch plus `main`, `master`, `develop`). `b4a-brain` may stay excluded or be included; the What and Why gate has no special case for it.
    - Enforcement: *Active*. The script itself is warn-only (exit 0) until 2026-10-19 00:00 UTC-3, so an *Active* ruleset does not block anyone before that date.
-   - Bypass list: leave empty.
+   - Bypass list: only the `release-bots` team (see "Activating the ruleset" below). Nothing else.
+   - Right after switching to *Active*, run the gate re-check so PRs that were already open get a run of this workflow (see "Activating the ruleset").
 3. **Workflow permissions.** The required workflow runs with the target repository's `GITHUB_TOKEN` and asks for `pull-requests: write` and `issues: write` in its `permissions` block. No change is needed for repositories using the default settings. If a repository has *Settings → Actions → General → Workflow permissions* locked down by a policy that forbids elevating permissions, the check still runs and fails correctly; only the comment is skipped (warning annotation).
 4. **Calling it directly** (instead of, or in addition to, the ruleset) from a repo workflow:
 
 ```yaml
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
 jobs:
   what-and-why:
     uses: B4AGroup/.github/.github/workflows/what-and-why.yml@main
@@ -107,7 +110,7 @@ its logic is in [`scripts/brain-context/`](scripts/brain-context/) (Node 20, no 
 2. In the PR description keep the `## Brain context` heading from the template and fill it with **one of**:
    - one link per line to the pages you read, as `https://github.com/B4AGroup/b4a-brain/blob/...` or `.../tree/...` URLs (links to the repo root, issues or PRs do not count), **or**
    - a line `none relevant: <reason>` where the reason has at least 15 characters (the placeholder `<reason>` does not count).
-3. If the check complains, edit the PR description. Editing re-runs the check (`edited` event); so does pushing a commit or changing labels.
+3. If the check complains, edit the PR description. Editing re-runs the check (`edited` event); so does pushing a commit, changing labels or marking the PR ready for review.
 
 Example that passes:
 
@@ -160,15 +163,16 @@ Phase B (planned, disabled): verify that the author actually ran `brain.search` 
    - Target repositories: *All repositories*, then exclude `b4a-brain` (repository name pattern exclude).
    - Target branches: *Include default branch*, plus patterns `main`, `master`, `develop`.
    - Rules: tick **Require workflows to pass before merging** → *Add workflow* → repository `B4AGroup/.github`, branch `main`, path `.github/workflows/brain-context.yml`.
-   - Bypass list: leave empty; use the `brain-context-exempt` label instead so overrides are logged.
-3. **Exempt label.** Create `brain-context-exempt` in each repo where leads may need it, and add it to *Organisation settings → Repository → Repository defaults → Labels* so new repos get it.
+   - Bypass list: only the `release-bots` team (see "Activating the ruleset" below). For developers use the `brain-context-exempt` label instead, so overrides are logged.
+   - Right after switching to *Active*, run the gate re-check so PRs that were already open get a run of this workflow (see "Activating the ruleset").
+3. **Exempt label.** Create `brain-context-exempt` in every repo (`node scripts/gate-recheck/recheck.mjs --mode exempt-label --apply`, or the *Gate re-check* workflow with mode `exempt-label`; see "Gate re-check tool"), and add it to *Organisation settings → Repository → Repository defaults → Labels* so new repos get it.
 4. **Optional token.** Add an org secret `BRAIN_CONTEXT_TOKEN` with read access to `b4a-brain` contents to turn on link existence checks. Without it the gate still runs with format-only validation.
 5. **Calling it directly** (instead of, or in addition to, the ruleset) from a repo workflow:
 
 ```yaml
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
 jobs:
   brain-context:
     uses: B4AGroup/.github/.github/workflows/brain-context.yml@main
@@ -182,6 +186,86 @@ jobs:
 ```bash
 node --test scripts/brain-context/lib.test.mjs
 ```
+
+## Activating the ruleset (org owners runbook)
+
+The org ruleset **Brain context gate** requires both workflows above (`brain-context.yml` and `what-and-why.yml`) on every repository's default branch plus `main`, `master` and `develop`. Two things bit us when it was briefly *Active* on 2026-10-11; the runbook below exists so they do not happen again.
+
+**Why pre-existing PRs get stuck.** A required workflow only runs when a `pull_request` event fires. PRs that were already open when the ruleset went live never had a run, so GitHub showed both checks as *Expected* and blocked the merge (b4a-prj-cs #749). Nothing re-runs them by itself: someone has to push, edit, relabel or re-open each PR. The gate re-check tool (next section) fires such an event on every open PR; both workflows listen to the same event types on purpose (`opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled`), so one label change re-runs both.
+
+**Why the release bot needs a bypass.** At least 15 repositories call [`tag-release-changelog.yml`](.github/workflows/tag-release-changelog.yml) (or the `-java` variant) on push to `master`. That workflow commits `chore(release): vX.Y.Z [skip ci]` and pushes it **directly to `master`** with `secrets.BOT_ACCESS_TOKEN`, whose owner is the GitHub user `b4a-bot`. With the ruleset *Active* that push was rejected on 2026-10-11 in `bfluence-frontend` with `GH013: Changes must be made through a pull request`, so the release tag and changelog were not produced. Org rulesets can only bypass **roles, teams, GitHub Apps and deploy keys**, not individual users, so the bypass must be a team. Do not change `tag-release-changelog.yml` for this; the bypass is the fix.
+
+### Steps
+
+1. **Pre-flight (before touching the ruleset).**
+   - `main` of this repo contains both workflows with identical `pull_request` trigger lists, and the tests are green (`node --test scripts/*/*.test.mjs`).
+   - The `brain-context-exempt` label exists in every repo: run the gate re-check tool in mode `exempt-label` (dry-run first, then `--apply`).
+   - A token for the re-check tool is in place (`GATE_RECHECK_TOKEN` or the App pair, see the next section), or you have a PAT at hand to run it locally.
+2. **Bypass for the release bot.** First confirm `b4a-bot` is an **organisation member** (*Organisation → People*); outside collaborators cannot join teams, so an outside-collaborator bot would have to be invited as a member first. Then *Organisation → Teams → New team*: name `release-bots`, members **only `b4a-bot`** (the owner of `BOT_ACCESS_TOKEN`). No humans in it: a bypass with mode *Always* lets its members push to protected branches without a PR. Then *Organisation settings → Repository → Rulesets → Brain context gate → Bypass list → Add bypass → Teams → `release-bots`*, bypass mode **Always** (not *Pull requests only*: the release commit is a direct push). The team needs no repository permissions of its own; the bot already pushes with its token. If `BOT_ACCESS_TOKEN` is ever replaced by a GitHub App token, bypass that App instead and remove the team.
+3. **Set the ruleset to Active.** Keep the targets (all repositories, `b4a-brain` excluded; default branch plus `main`, `master`, `develop`) and both required workflows (repository `B4AGroup/.github`, branch `main`).
+4. **Run the gate re-check immediately.** *Actions → Gate re-check → Run workflow*, mode `recheck`, `apply` unticked: read the plan (which repos, which PRs, which labels would be created). Then run it again with `apply` ticked. Each PR gets the `gate-recheck` label added and removed; both required workflows run on each; authors of PRs with a missing *What and Why* section get the sticky comment. Until this step is done, every PR that was open before step 3 shows the two checks as *Expected* and cannot be merged.
+5. **Verify.** Open two or three of the listed PRs (a draft, a ready one, one targeting `develop`): both checks appear and finished. Check the ruleset *Insights* for unexpected bypasses or failures.
+6. **Watch the next release.** On the next merge to `master` in a repo that uses `tag-release-changelog.yml`, confirm the `chore(release)` push succeeded and the tag exists. If it fails with `GH013`, the bypass team is missing or its mode is not *Always*.
+
+Rolling back is one click (*Enforcement → Disabled*); nothing in this repo needs to change for that.
+
+## Gate re-check tool
+
+[`scripts/gate-recheck/`](scripts/gate-recheck/) (Node 20, no dependencies) and the manual workflow [`.github/workflows/gate-recheck.yml`](.github/workflows/gate-recheck.yml).
+
+### What it does
+
+| Mode | Action |
+| --- | --- |
+| `recheck` (default) | Lists every open PR (drafts included) in the organisation whose base branch is the repository's default branch, `main`, `master` or `develop`. In each repository that has such PRs it creates the `gate-recheck` label if missing, then for each PR **adds and removes** that label. Each change is a `pull_request` event (`labeled`, then `unlabeled`), so both required workflows run. A PR that already carries the label only gets the removal. |
+| `exempt-label` | Creates the `brain-context-exempt` label (colour and description included) in every repository that lacks it. |
+
+In both modes:
+
+- **Dry-run by default.** Without `--apply` the tool only reads and prints what it would touch (`[dry-run] B4AGroup/repo#12 "title" (base develop, draft, by ana) -> would add + remove "gate-recheck"`), plus totals. Nothing is written.
+- **Skips** archived repositories, disabled repositories and `b4a-brain` (always), plus anything passed with `--exclude`. PRs whose base is another branch (feature, release, …) are counted but not touched.
+- **Rate-limit friendly.** Pauses after every write (`--delay-ms`, default 1000) and between the label add and remove on one PR (`--settle-ms`, default 2000); retries `429`/`403` rate-limit answers after `Retry-After` or until `X-RateLimit-Reset`; pauses by itself when fewer than 25 requests remain; backs off on 5xx (3 retries). The workflow runs one re-check at a time (`concurrency`).
+- **Keeps going.** A repository the token cannot read, or a PR that refuses a label, is recorded as an error and the run continues. Exit code `0` = no errors, `1` = some errors (listed at the end and in the job summary), `2` = usage or token problem.
+- Writes a Markdown table to the job summary (`GITHUB_STEP_SUMMARY`) when run inside Actions.
+
+### Running it locally
+
+```bash
+# plan only
+GATE_RECHECK_TOKEN=<token> node scripts/gate-recheck/recheck.mjs
+# one repository, drafts excluded
+GATE_RECHECK_TOKEN=<token> node scripts/gate-recheck/recheck.mjs --repo bfluence-frontend --skip-drafts
+# do it
+GATE_RECHECK_TOKEN=<token> node scripts/gate-recheck/recheck.mjs --apply
+# exempt label everywhere
+GATE_RECHECK_TOKEN=<token> node scripts/gate-recheck/recheck.mjs --mode exempt-label --apply
+node scripts/gate-recheck/recheck.mjs --help
+```
+
+The token is read from `GATE_RECHECK_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`; it is never printed. Pass it through the environment, not on the command line.
+
+### Running it from Actions
+
+*Actions → Gate re-check → Run workflow* with inputs `mode`, `apply` (unticked = dry-run), `repos` (optional comma-separated names) and `skip_drafts`. The job summary shows the plan or the result.
+
+### Token: why not `GITHUB_TOKEN`
+
+Events created with a workflow's own `GITHUB_TOKEN` **do not trigger other workflows** (GitHub prevents recursive runs), so a label added with it would not start the required checks. It also cannot see the other repositories of the organisation. The workflow therefore needs one of the following org secrets. **Neither is assumed to exist**: the job fails early with a message naming both options when none is configured.
+
+| Option | Secrets | Notes |
+| --- | --- | --- |
+| GitHub App (preferred) | `GATE_RECHECK_APP_ID`, `GATE_RECHECK_APP_PRIVATE_KEY` | App installed on all org repositories with *Pull requests: write* and *Issues: write* (labels live in the issues API) plus *Metadata: read*. The workflow mints a one-hour installation token per run with `actions/create-github-app-token`. Events it creates trigger workflows normally. |
+| Personal access token | `GATE_RECHECK_TOKEN` | Classic PAT with scope `repo`, or fine-grained PAT (resource owner `B4AGroup`, all repositories, *Pull requests: write*, *Issues: write*, *Metadata: read*). Prefer a bot account over a personal one so the label events are not attributed to a person. The existing `BOT_ACCESS_TOKEN` (b4a-bot) would work technically, but it is scoped to the release pipeline; use a separate secret so rotating one does not break the other. |
+
+When both exist, the App token wins. Running the tool locally needs the same permissions on whatever token you export.
+
+### Tests
+
+```bash
+node --test scripts/gate-recheck/lib.test.mjs scripts/gate-recheck/recheck.test.mjs scripts/gate-recheck/triggers.test.mjs
+```
+
+`lib.test.mjs` runs both modes against an in-memory GitHub fake (dry-run writes nothing, apply order, already-labelled PRs, skipped repos, per-repo failures, rate-limit retries). `recheck.test.mjs` spawns the CLI against a local HTTP fake. `triggers.test.mjs` fails if the two required workflows stop sharing the same `pull_request` trigger list.
 
 ## PR intent review (warn-only pilot)
 

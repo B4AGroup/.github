@@ -429,6 +429,16 @@ describe('runCheck', () => {
     assert.equal((await runCheck({ event: removed, env: {}, now: AFTER, fetch: fakeFetch([]) })).status, 'fail');
   });
 
+  test('should give the same verdict for every pull_request type the workflow triggers on', async () => {
+    const types = ['opened', 'edited', 'synchronize', 'reopened', 'ready_for_review', 'labeled', 'unlabeled'];
+    for (const action of types) {
+      const failing = await runCheck({ event: { action, pull_request: makePr({ body: body('- ') }) }, env: {}, now: AFTER, fetch: fakeFetch([]) });
+      assert.equal(failing.status, 'fail', `expected fail on ${action}`);
+      const passing = await runCheck({ event: { action, pull_request: makePr() }, env: {}, now: AFTER, fetch: denied() });
+      assert.equal(passing.status, 'pass', `expected pass on ${action}`);
+    }
+  });
+
   test('should treat a null body as missing section', async () => {
     const pr = makePr({ body: null });
     const result = await runCheck({ event: { pull_request: pr }, env: {}, now: AFTER, fetch: fakeFetch([]) });

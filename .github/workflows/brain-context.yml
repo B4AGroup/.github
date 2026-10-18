@@ -8,10 +8,14 @@ name: Brain context
 #   2. Called from a repo workflow with `uses: B4AGroup/.github/.github/workflows/brain-context.yml@main`.
 #
 # Logic and tests live in scripts/brain-context/. See README.md ("Brain context gate").
+#
+# The trigger list is identical to what-and-why.yml on purpose: both are
+# required by the same org ruleset, so any event that re-runs one must re-run
+# the other (scripts/gate-recheck relies on labeled/unlabeled for that).
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_call:
     inputs:
       enforce_after:

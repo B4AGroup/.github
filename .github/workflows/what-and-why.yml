@@ -19,10 +19,14 @@ name: What and Why
 #   2. Called from a repo workflow with `uses: B4AGroup/.github/.github/workflows/what-and-why.yml@main`.
 #
 # Logic and tests live in scripts/what-and-why/. See README.md ("What and Why gate").
+#
+# The trigger list is identical to brain-context.yml on purpose: both are
+# required by the same org ruleset, so any event that re-runs one must re-run
+# the other (scripts/gate-recheck relies on labeled/unlabeled for that).
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_call:
 
 permissions:

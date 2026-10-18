@@ -46,18 +46,26 @@ function forkPr(overrides = {}) {
 }
 
 /**
- * Fake GitHub API. `existing` is the list of comments on the PR.
+ * Fake GitHub API. `existing` is the list of comments on the PR; `listSequence`
+ * (optional) gives a different page-1 list for each successive listing, which
+ * simulates a concurrent run posting between two reads.
  * Records every call as { method, url, body }.
  */
-function fakeApi({ existing = [], listStatus = 200, createStatus = 201, updateStatus = 200 } = {}) {
+function fakeApi({ existing = [], listSequence = null, listStatus = 200, createStatus = 201, updateStatus = 200, deleteStatus = 204 } = {}) {
   const calls = [];
+  let listings = 0;
   const fetch = async (url, init = {}) => {
     const method = init.method ?? 'GET';
     const payload = init.body ? JSON.parse(init.body) : null;
     calls.push({ method, url, body: payload });
     if (method === 'GET' && url.startsWith(COMMENTS_URL)) {
       const page = Number(new URL(url).searchParams.get('page') ?? '1');
-      const slice = page === 1 ? existing : [];
+      let pageOne = existing;
+      if (listSequence) {
+        pageOne = listSequence[Math.min(listings, listSequence.length - 1)];
+        if (page === 1) listings += 1;
+      }
+      const slice = page === 1 ? pageOne : [];
       return { status: listStatus, json: async () => slice };
     }
     if (method === 'POST' && url === COMMENTS_URL) {
@@ -65,6 +73,9 @@ function fakeApi({ existing = [], listStatus = 200, createStatus = 201, updateSt
     }
     if (method === 'PATCH' && url.includes('/issues/comments/')) {
       return { status: updateStatus, json: async () => ({ id: 7, html_url: 'https://github.com/c/7' }) };
+    }
+    if (method === 'DELETE' && url.includes('/issues/comments/')) {
+      return { status: deleteStatus, json: async () => ({}) };
     }
     return { status: 500, json: async () => ({}) };
   };
@@ -308,12 +319,19 @@ describe('findStickyComment', () => {
   test('should return the first comment carrying the marker', async () => {
     const fetch = fakeApi({ existing: [{ id: 1, body: 'hi' }, stickyComment(`${COMMENT_MARKER}\nold`)] });
     const result = await findStickyComment({ ...io, fetch });
-    assert.deepEqual(result, { comment: { id: 7, body: `${COMMENT_MARKER}\nold`, url: 'https://github.com/c/7' } });
+    assert.deepEqual(result, { comment: { id: 7, body: `${COMMENT_MARKER}\nold`, url: 'https://github.com/c/7' }, duplicates: [] });
   });
   test('should return null when no comment has the marker', async () => {
     const fetch = fakeApi({ existing: [{ id: 1, body: 'hi' }] });
-    assert.deepEqual(await findStickyComment({ ...io, fetch }), { comment: null });
+    assert.deepEqual(await findStickyComment({ ...io, fetch }), { comment: null, duplicates: [] });
     assert.equal(fetch.calls.length, 1);
+  });
+  test('should keep the oldest marker comment and list the newer ones as duplicates', async () => {
+    const newer = { id: 901, body: `${COMMENT_MARKER}\nracing`, html_url: 'https://github.com/c/901' };
+    const fetch = fakeApi({ existing: [newer, { id: 2, body: 'plain' }, stickyComment(`${COMMENT_MARKER}\nold`)] });
+    const result = await findStickyComment({ ...io, fetch });
+    assert.equal(result.comment.id, 7);
+    assert.deepEqual(result.duplicates.map((comment) => comment.id), [901]);
   });
   test('should report an error on a non-200 listing', async () => {
     const fetch = fakeApi({ listStatus: 403 });
@@ -429,6 +447,73 @@ describe('syncStickyComment', () => {
   test('should report an error when the payload has no repo or number', async () => {
     const result = await syncStickyComment({ ...base, pr: { number: 1 }, failing: true, fetch: fakeApi() });
     assert.equal(result.action, 'error');
+  });
+
+  describe('concurrent runs (labeled + unlabeled fired within a second)', () => {
+    const ours = { id: 900, body: `${COMMENT_MARKER}\nours`, html_url: 'https://github.com/c/900' };
+    const theirs = { id: 899, body: `${COMMENT_MARKER}\ntheirs`, html_url: 'https://github.com/c/899' };
+
+    test('should delete its own comment when another run posted first between the list and the create', async () => {
+      const fetch = fakeApi({ listSequence: [[], [theirs, ours]] });
+      const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+      assert.equal(result.action, 'created');
+      assert.equal(result.url, 'https://github.com/c/899');
+      assert.match(result.note, /Removed 1 duplicate comment left by a concurrent run/);
+      const deletes = fetch.calls.filter((call) => call.method === 'DELETE');
+      assert.equal(deletes.length, 1);
+      assert.match(deletes[0].url, /\/issues\/comments\/900$/);
+    });
+    test('should keep its own comment when it is the oldest after the create', async () => {
+      const later = { id: 950, body: `${COMMENT_MARKER}\nlater`, html_url: 'https://github.com/c/950' };
+      const fetch = fakeApi({ listSequence: [[], [ours, later]] });
+      const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+      assert.equal(result.action, 'created');
+      assert.equal(result.url, 'https://github.com/c/900');
+      const deletes = fetch.calls.filter((call) => call.method === 'DELETE');
+      assert.deepEqual(deletes.map((call) => call.url.split('/').pop()), ['950']);
+    });
+    test('should not delete anything when the re-read shows a single comment', async () => {
+      const fetch = fakeApi({ listSequence: [[], [ours]] });
+      const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+      assert.equal(result.action, 'created');
+      assert.doesNotMatch(result.note, /duplicate/);
+      assert.equal(fetch.calls.filter((call) => call.method === 'DELETE').length, 0);
+    });
+    test('should still report created when the re-read fails', async () => {
+      let listings = 0;
+      const inner = fakeApi();
+      const fetch = async (url, init = {}) => {
+        if ((init.method ?? 'GET') === 'GET' && url.startsWith(COMMENTS_URL)) {
+          listings += 1;
+          if (listings === 2) return { status: 502, json: async () => ({}) };
+        }
+        return inner(url, init);
+      };
+      const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+      assert.equal(result.action, 'created');
+      assert.equal(result.url, 'https://github.com/c/900');
+    });
+    test('should remove pre-existing duplicates and update the oldest in place', async () => {
+      const fetch = fakeApi({ existing: [ours, theirs] });
+      const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+      assert.equal(result.action, 'updated');
+      assert.match(result.note, /Removed 1 duplicate comment/);
+      const patch = fetch.calls.find((call) => call.method === 'PATCH');
+      assert.match(patch.url, /\/issues\/comments\/899$/);
+      const deletes = fetch.calls.filter((call) => call.method === 'DELETE');
+      assert.match(deletes[0].url, /\/issues\/comments\/900$/);
+    });
+    test('should count a 404 on delete as already gone (the other run deleted it first)', async () => {
+      const fetch = fakeApi({ existing: [ours, theirs], deleteStatus: 404 });
+      const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+      assert.match(result.note, /Removed 1 duplicate comment/);
+    });
+    test('should not count a failed delete and still finish the sync', async () => {
+      const fetch = fakeApi({ existing: [ours, theirs], deleteStatus: 500 });
+      const result = await syncStickyComment({ ...base, pr: makePr(), failing: true, fetch });
+      assert.equal(result.action, 'updated');
+      assert.doesNotMatch(result.note, /Removed/);
+    });
   });
 });
 
@@ -555,14 +640,42 @@ describe('runCheck — blocking mode (from 2026-10-19 00:00 UTC-3)', () => {
     assert.match(result.summary, /no "## What and Why" heading/);
   });
 
+  test('should post the mentioning comment on labeled when none exists (gate re-check of a pre-existing PR)', async () => {
+    const fetch = fakeApi();
+    const pr = makePr({ body: body('') });
+    const result = await run({ action: 'labeled', label: { name: 'gate-recheck' }, pull_request: pr }, { fetch });
+    assert.equal(result.status, 'fail');
+    assert.equal(result.comment.action, 'created');
+    assert.equal(fetch.calls.filter((call) => call.method === 'POST').length, 1);
+  });
+
+  test('should leave the existing comment untouched on unlabeled when nothing changed (no duplicate)', async () => {
+    const pr = makePr({ body: body('') });
+    const first = fakeApi();
+    await run({ action: 'labeled', label: { name: 'gate-recheck' }, pull_request: pr }, { fetch: first });
+    const posted = first.calls.find((call) => call.method === 'POST').body.body;
+    const second = fakeApi({ existing: [{ id: 900, body: posted, html_url: 'https://github.com/c/900' }] });
+    const result = await run({ action: 'unlabeled', label: { name: 'gate-recheck' }, pull_request: pr }, { fetch: second });
+    assert.equal(result.status, 'fail');
+    assert.equal(result.comment.action, 'unchanged');
+    assert.equal(second.calls.filter((call) => ['POST', 'PATCH', 'DELETE'].includes(call.method)).length, 0);
+  });
+
+  test('should resolve the comment on labeled when the section was filled meanwhile', async () => {
+    const fetch = fakeApi({ existing: [stickyComment(`${COMMENT_MARKER}\nold`)] });
+    const result = await run({ action: 'labeled', label: { name: 'brain-context-exempt' }, pull_request: makePr() }, { fetch });
+    assert.equal(result.status, 'pass');
+    assert.equal(result.comment.action, 'resolved');
+  });
+
   test('should not sync the comment for actions outside the comment list', async () => {
     const fetch = fakeApi();
     const pr = makePr({ body: body('') });
-    const result = await run({ action: 'labeled', pull_request: pr }, { fetch });
+    const result = await run({ action: 'assigned', pull_request: pr }, { fetch });
     assert.equal(result.status, 'fail');
     assert.equal(result.comment, null);
     assert.equal(fetch.calls.length, 0);
-    assert.match(result.summary, /Comment sync skipped for event action "labeled"/);
+    assert.match(result.summary, /Comment sync skipped for event action "assigned"/);
   });
 
   test('should include the run URL in the posted comment when the env provides it', async () => {
@@ -731,6 +844,9 @@ describe('runCheck — warn mode (before 2026-10-19 00:00 UTC-3)', () => {
 
 describe('COMMENT_ACTIONS', () => {
   test('should include every pull_request type the workflow triggers on', () => {
-    assert.deepEqual([...COMMENT_ACTIONS].sort(), ['edited', 'opened', 'ready_for_review', 'reopened', 'synchronize']);
+    assert.deepEqual(
+      [...COMMENT_ACTIONS].sort(),
+      ['edited', 'labeled', 'opened', 'ready_for_review', 'reopened', 'synchronize', 'unlabeled'],
+    );
   });
 });
