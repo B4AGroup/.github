@@ -1,0 +1,105 @@
+name: Gate re-check
+
+# Manual tool for org owners. Two modes, both DRY-RUN unless `apply` is ticked:
+#   recheck       — adds and removes the `gate-recheck` label on every open PR of
+#                   the organisation whose base is the default branch, main, master
+#                   or develop. Each label change is a pull_request event, so both
+#                   ruleset required workflows (Brain context, What and Why) run on
+#                   PRs that were open before the ruleset was activated.
+#   exempt-label  — creates the `brain-context-exempt` label in every repo lacking it.
+# Logic and tests: scripts/gate-recheck/. See README.md ("Gate re-check tool").
+#
+# Token. Events created with this workflow's own GITHUB_TOKEN do not trigger other
+# workflows (and it cannot see the other repositories anyway), so one of these
+# org secrets must exist; nothing here assumes which:
+#   - GATE_RECHECK_TOKEN: a PAT with write access to issues/pull requests in every
+#     org repo (classic scope `repo`, or fine-grained: Metadata read, Pull requests
+#     write, Issues write, on all repositories).
+#   - GATE_RECHECK_APP_ID + GATE_RECHECK_APP_PRIVATE_KEY: a GitHub App installed on
+#     all org repos with Pull requests: write and Issues: write. Preferred when
+#     available (the App token is minted per run and expires after one hour).
+# When both exist the App token wins. When neither exists the job fails early.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: recheck = fire pull_request events on open PRs; exempt-label = create brain-context-exempt everywhere
+        type: choice
+        options: [recheck, exempt-label]
+        default: recheck
+      apply:
+        description: Actually write. Leave unticked for a dry-run that only prints what would be touched.
+        type: boolean
+        default: false
+      repos:
+        description: Optional comma-separated repository names to restrict the run (default all non-archived repos).
+        type: string
+        default: ''
+      skip_drafts:
+        description: Skip draft pull requests (recheck mode only).
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One re-check at a time: the tool paces its writes against the API rate limit.
+concurrency:
+  group: gate-recheck
+  cancel-in-progress: false
+
+jobs:
+  gate-recheck:
+    name: ${{ inputs.mode }} (${{ inputs.apply && 'apply' || 'dry-run' }})
+    runs-on: ubuntu-latest
+    env:
+      HAS_APP_SECRETS: ${{ secrets.GATE_RECHECK_APP_ID != '' && secrets.GATE_RECHECK_APP_PRIVATE_KEY != '' }}
+    steps:
+      - name: Check out the tool
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/gate-recheck
+          persist-credentials: false
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Mint a GitHub App token (only when the App secrets exist)
+        id: app-token
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GATE_RECHECK_APP_ID }}
+          private-key: ${{ secrets.GATE_RECHECK_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Check that a token is configured
+        env:
+          HAS_PAT: ${{ secrets.GATE_RECHECK_TOKEN != '' }}
+          HAS_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
+        run: |
+          if [ "$HAS_APP_TOKEN" = "true" ]; then
+            echo "Using the GitHub App token (GATE_RECHECK_APP_ID)."
+          elif [ "$HAS_PAT" = "true" ]; then
+            echo "Using the PAT from GATE_RECHECK_TOKEN."
+          else
+            echo "::error::No token configured. Add the org secret GATE_RECHECK_TOKEN (PAT) or GATE_RECHECK_APP_ID + GATE_RECHECK_APP_PRIVATE_KEY (GitHub App). The workflow's own GITHUB_TOKEN cannot be used: events it creates do not trigger workflows. See README.md, 'Gate re-check tool'."
+            exit 1
+          fi
+
+      - name: Run the gate re-check tool
+        env:
+          GATE_RECHECK_TOKEN: ${{ steps.app-token.outputs.token || secrets.GATE_RECHECK_TOKEN }}
+          MODE: ${{ inputs.mode }}
+          APPLY: ${{ inputs.apply }}
+          REPOS: ${{ inputs.repos }}
+          SKIP_DRAFTS: ${{ inputs.skip_drafts }}
+        run: |
+          set -- --mode "$MODE" --org "${GITHUB_REPOSITORY_OWNER}"
+          if [ "$APPLY" = "true" ]; then set -- "$@" --apply; fi
+          if [ -n "$REPOS" ]; then set -- "$@" --repo "$REPOS"; fi
+          if [ "$SKIP_DRAFTS" = "true" ]; then set -- "$@" --skip-drafts; fi
+          node scripts/gate-recheck/recheck.mjs "$@"
